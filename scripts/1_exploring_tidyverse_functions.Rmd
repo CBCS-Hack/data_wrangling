@@ -1,0 +1,204 @@
+---
+title: "Exploring tidyverse functions"
+author: "Rich Cottrell"
+date: "14/03/2022"
+output: html_document
+---
+
+The aim of this first session was to explore some basic tidyverse functions and a couple of useful packages used when data wrangling. We can first start by reading in some libraries that will be needed.
+
+
+```{r, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+library(tidyverse) # a collection of packages that include readr, dplyr, ggplot among others
+library(janitor) #great package aimed at tidying data
+library(here) # useful in conjunction with projects to specify shorter file paths without needing to change working directories
+
+
+```
+
+We're gonna use some FAO fisheries data which is a decent enough size and can come with some small niggly issues which are nice examples to practice with. I'll first pull the csv file off my machine and save it as an RDS so it can be stored easily on GitHub (RDS objects are small compared to csv). But it'll still brought in as a tibble using readRDS as with read_csv, so it is easy to reproduce this approach with a csv file too. 
+
+You don't need to run this chunk (it won't work).
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+
+fisheries_from_rich_computer <- read_csv(file.path("/mnt/rdsi/raw_data/fao/FAO_fishstat_2019/fisheries_prod_raw.csv")) %>% # the csv from my remote repository don't need to run this
+      saveRDS(file= here("data/fisheries_prod_raw.rds"))
+
+```
+
+
+Now we can bring in the file using 'readRDS' and start tidying.  When you view the raw data you can see, the column names are horrrrrible - with spaces and parentheses - and the data is in wide format. Often we want to convert it to long format, as the column-based vectors are what some visualisation tools such as ggplot often require. Converting the data to wide format, removing certain issues with the data so that we can operate on it and summarise it will be the focus of this session.
+
+Typically I would do this is one big pipeline (I'll illustrate at the end), but I have broken it into chunks to ease description.
+
+
+```{r,  results='hide', warning=FALSE, , message=FALSE}
+
+(fisheries <- readRDS(here("data/fisheries_prod_raw.rds")) # reading in the compressed rds format data
+ )
+
+
+```
+
+Using janitor to clean the names up is an easy first step, although not always what you want
+```{r, message=FALSE}
+
+fisheries_clean <- fisheries %>% 
+  clean_names()
+
+```
+
+Next step is to convert the wide format to long. We can do this using pivot longer
+```{r}
+
+fisheries_clean_1 <- fisheries_clean %>% 
+  pivot_longer(names_to = "year", values_to = "value",  # so here we are saying we want the column names to go to variables and the values to go from mutliple columns to one.
+               cols = -c(country_country, species_asfis_species, fishing_area_fao_major_fishing_area, unit_unit)) #here we are saying this needs to be done to all but the first four columns
+
+```
+
+So the data is now in long format. But lets look at our data. What are the countries included for example, what are the classes of data stored? A quick check of the data summary shows the year and value data are still characters (not great for reasons we go into below). A quick look at unique countries included also shows that a few countries are based off totals or are the citation at the end of the spreadsheet. Lets remove them by using 'filter'
+
+```{r,  results='hide', warning=FALSE, message=FALSE}
+summary(fisheries_clean_1) 
+
+unique(fisheries_clean_1$country_country) 
+
+fisheries_clean_2 <- fisheries_clean_1 %>% 
+  filter(!country_country %in% c("Totals - Tonnes - live weight",   "Totals - Number" , "FAO. 2019. Fishery and Aquaculture Statistics. Global capture production 1950-2017 (FishstatJ). In: FAO Fisheries and Aquaculture Department [online]. Rome. Updated 2019. www.fao.org/fishery/statistics/software/fishstatj/en")) #the %in% operator allows you to identify one or several  values for a variable out of many (instead of e.g. "==" which is restricted to one)
+
+
+
+```
+
+Looking into the years and vlaues as character variables. The reasons are the years now have an x before them which is not we want in any future figure or visualisation. If you scroll through the data, clicking the 'Next' button when in the viewer within markdown, you will see that the values (here supposed to be fish landings in tonnes) also have flags such as 'F' or are absent with only some symbols representing unknown amounts. In FAO fisheries data this is often:
+
+"..." = data unavailable (here taken as zero)
+" " = data not separately available (here taken as zero)
+"-" = nil or zero (make zero)
+"0 0" = more than zero but less than half the unit used (taken to be 0.25)
+F = FAO estimate from available sources of information
+
+The presence of these flags is often important information to retain but we don't want to keep it in the 'value column' (this makes it a character and you can't perform numerical functions on characters should we want to later). So we need to take the x's out of 'year' and the flags out of 'value', reporting the proper numerical values, and create a "flag" variable that retains that information. We can do this using 'mutate' which allows us to either mchange or mutate an existing column or create a new one that we specify.
+
+```{r, message=FALSE}
+
+fisheries_clean_3 <-  fisheries_clean_2 %>% 
+  mutate(year = gsub("x", "", year) %>%    #we can use mutate 'gsub' to edit the coumn 'year' by substituting the x in year for nothing i.e. take the x away
+            as.numeric,                    #now make year numeric
+          flag = case_when(value == "..." ~ "No data",                      # we can then use 'mutate' to create a new column for flags which create values conditional on those found in the current 'value' column
+                           value == " " ~ "Data not separately available",  # for the conditional process we can use case_when which allows lots of conditional statements a bit like lots of if_else to allow classifying the flags in the new variable
+                           value == "-" ~ "Nil or zero",                 
+                           value == "0 0" ~ "0<x<0.5",
+                           grepl(" F", value) ~ "estimate",
+                           TRUE ~ "Reported"),                          
+          value = case_when(value %in% c("...", " ", "-") ~ "0",        # for all these flags, make value 0 - keeping it as a character - putting in numbers here will make R throw a hissy
+                            value == "0 0" ~ "0.25",                    # for this flag make it halfway between 0 and 0.5 units (as above)
+                            grepl(" F", value) ~ gsub(" F", "", value), # where there is F - get rid of it
+                            TRUE ~ value) %>%                           # for everything else keep it as is 
+            as.numeric)                                                 # make value numeric
+
+  
+
+
+
+```
+This is looking much better. We can also choose to rename the variables using 'rename' if we are not happy with the way janitor did it. I typically do this further up to make use of more streamlined variable names for this whole process but we're just demonstrating. Also if you are comfortable with the data and the units that data are in (i.e. you work a lot with FAO fisheries data and know they report in tonnes), then you may also want to remove the unit column. We do this via 'select'
+```{r, message=FALSE}
+
+fisheries_clean_4 <- fisheries_clean_3 %>% 
+  rename(country = country_country,
+         species = species_asfis_species,
+         area = fishing_area_fao_major_fishing_area) %>% 
+  select(-unit_unit)
+
+
+```
+Now the data is the way you want it to be, in terms of variable class, nomenclature, and long format we can start manipulating. Say you want to know how much a country produces each year - but you don't care about the species or the area (inland or marine) - we can group by the variables we are interested in (country and year) using 'group_by' and summarise that data into a new variable using 'summarise'. Don't forget to ungroup()!
+
+
+```{r, message=FALSE}
+
+fisheries_clean_5 <- fisheries_clean_4 %>% 
+  group_by(country, year) %>% 
+  summarise(sum_value = sum(value, na.rm = TRUE)) %>% 
+  ungroup()
+
+```
+
+We can then add other columns that are a function of existing ones. Sometimes this means you need to operate on each set of values independently as if they were different data frames. A combination of group_by() and nest() splits your data frame into a list of data frames based on your grouping variables. Then using mutate we can map a function onto your split dataframes using map from the purrr package to create the new column. You can then unnest() and ungroup() to bring it all together again at the end. I'll demonstrate by getting the relative production for each country (relative to 1950 that is).
+
+```{r, message=FALSE}
+
+fisheries_clean_6 <- fisheries_clean_5 %>% 
+  group_by(country) %>% 
+  nest() %>% 
+  mutate(rel_value = purrr::map(data, ~(.$sum_value/.$sum_value[1]))) %>% 
+  unnest(cols = c(data, rel_value)) %>% 
+  ungroup()
+  
+  
+
+```
+
+Another really useful set of functions are the join functions. IF you had a dataframe where you wanted to add additional information for each country and year for example, a left_join() could be really useful. This join type is a left join because when joing data frames/ tibbles A and B (in that order), it will match the datasets using variables you dictate. All of the information of data frame A is retained in the left join and matched to those relevant in data frame B. 
+
+right_join() retains all relevant information in df B, inner_join() retains only  information both data sets possess, full_join() retains all data from both dataframes. You need to pick the one right for your needs. Here I demonstrate a left_join with a dataset with fake GDP data for Afghanistan.
+
+```{r, message=FALSE}
+
+GDP <- tibble(country = "Afghanistan", year = c(1950, 1951), gdp_millions = c(3000, 4000))
+
+fisheries_clean_7 <- 
+  fisheries_clean_6 %>% 
+  left_join(GDP, by = c("country", "year")) #notice the rest of the GDP variable is returned as NA where there are no matches
+
+
+
+```
+
+
+
+
+Usually you wouldn't need to create this many objects but it's easy to show this way. Below is the whole process redone in one continuous pipe. Once done you are ready to start playing around with your data, adding more variables, and presenting it. Happy wrangling!
+
+```{r, message=FALSE}
+
+
+fisheries_final <- 
+  readRDS(here("data/fisheries_prod_raw.rds")) %>% 
+  clean_names() %>% 
+  pivot_longer(names_to = "year", values_to = "value", 
+               cols = -c(country_country, species_asfis_species, fishing_area_fao_major_fishing_area, unit_unit)) %>% 
+                 filter(!country_country %in% c("Totals - Tonnes - live weight",   "Totals - Number" , "FAO. 2019. Fishery and Aquaculture Statistics. Global capture production 1950-2017 (FishstatJ). In: FAO Fisheries and Aquaculture Department [online]. Rome. Updated 2019. www.fao.org/fishery/statistics/software/fishstatj/en")) %>% 
+                 mutate(year = gsub("x", "", year) %>%    
+            as.numeric,                   
+          flag = case_when(value == "..." ~ "No data",                      
+                           value == " " ~ "Data not separately available",
+                           value == "-" ~ "Nil or zero",                 
+                           value == "0 0" ~ "0<x<0.5",
+                           grepl(" F", value) ~ "estimate",
+                           TRUE ~ "Reported"),                          
+          value = case_when(value %in% c("...", " ", "-") ~ "0",        
+                            value == "0 0" ~ "0.25",                    
+                            grepl(" F", value) ~ gsub(" F", "", value), 
+                            TRUE ~ value) %>%                         
+            as.numeric) %>% 
+  rename(country = country_country,
+         species = species_asfis_species,
+         area = fishing_area_fao_major_fishing_area) %>% 
+  select(-unit_unit) %>% 
+  group_by(country, year) %>% 
+  summarise(sum_value = sum(value, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(country) %>% 
+  nest() %>% 
+  mutate(rel_value = purrr::map(data, ~(.$sum_value/.$sum_value[1]))) %>% 
+  unnest(cols = c(data, rel_value)) %>% 
+  ungroup() %>% 
+  left_join(GDP, by = c("country", "year")) 
+                 
+
+```
+
